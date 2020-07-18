@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/snappy"
 )
 
 type kafkaConfs struct {
@@ -22,6 +24,34 @@ type pedido struct {
 	Valortotal  string `json:"valortotal"`
 	Qntparcelas string `json:"qntparcelas"`
 	Datacompra  string `json:"datacompra"`
+}
+
+// AggregationProducts list all pedidos and send a new topic with total pedidos after has 5
+func AggregationProducts(parent context.Context, listpedidos []pedido, writer *kafka.Writer) (listpedidoss []pedido) {
+	if len(listpedidos) > 5 {
+		var totalcompras float64
+		totalcompras = 0
+		currentTime := time.Now()
+		strcurrentTime := currentTime.Format("2006.01.02 15:04:05")
+
+		for _, item := range listpedidos {
+			valor, _ := strconv.ParseFloat(item.Valortotal, 2)
+			totalcompras = totalcompras + valor
+		}
+		strtotal := strconv.FormatFloat(totalcompras, 'f', 6, 64)
+		msg := fmt.Sprintf(` {"totalcompras": %s,"datapush:" %s }  `, strtotal, strcurrentTime)
+
+		message := kafka.Message{
+			Key:   nil,
+			Value: []byte(msg),
+		}
+		writer.WriteMessages(parent, message)
+
+		// clean list after send topic
+		listpedidos = []pedido{}
+		return listpedidos
+	}
+	return listpedidos
 }
 
 func main() {
@@ -42,10 +72,30 @@ func main() {
 		MaxWait:         10 * time.Second,
 		ReadLagInterval: -1,
 	}
+
+	dialer := &kafka.Dialer{
+		Timeout:  10 * time.Second,
+		ClientID: myConf.kafkaClientID,
+	}
+
+	// Defined configs about writer in topic totalpedidos
+	configWriter := kafka.WriterConfig{
+		Brokers:          myConf.kafkaBrokerURL,
+		Topic:            "totalpedidos",
+		Balancer:         &kafka.LeastBytes{},
+		Dialer:           dialer,
+		WriteTimeout:     10 * time.Second,
+		ReadTimeout:      10 * time.Second,
+		CompressionCodec: snappy.NewCompressionCodec(),
+	}
+
+	// Instance objects writer and reader topics
+	writer := kafka.NewWriter(configWriter)
 	reader := kafka.NewReader(config)
+
 	defer reader.Close()
+
 	fmt.Println("Receiving messages....")
-	//pedidos := []pedidos{}
 	for {
 		m, err := reader.ReadMessage(context.Background())
 		if err != nil {
@@ -68,6 +118,8 @@ func main() {
 		}
 
 		listpedidos = append(listpedidos, pedidos)
+
+		listpedidos = AggregationProducts(context.Background(), listpedidos, writer)
 
 	}
 
